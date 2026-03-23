@@ -40,9 +40,9 @@ public class WebSocketManager : MonoBehaviour
     private Queue<ReceivedData> _dataQueue = new Queue<ReceivedData>();
     private readonly object _queueLock = new object();
 
-    // Biến lưu dữ liệu đang nhận theo kiểu chunk (nếu ảnh lớn)
-    private string _pendingText = null;
-    private bool _waitingForImage = false;
+    // Queue để lưu pending text messages (xử lý multiple messages)
+    private Queue<string> _pendingTexts = new Queue<string>();
+    private readonly object _textQueueLock = new object();
 
     private void Awake()
     {
@@ -152,34 +152,48 @@ public class WebSocketManager : MonoBehaviour
                 }
 
                 lock (_queueLock) { _dataQueue.Enqueue(data); }
-                Debug.Log($"[WebSocket] Nhận JSON: text='{payload.text}', hasImage={!string.IsNullOrEmpty(payload.image)}");
+                Debug.Log($"[WebSocket] ✅ Nhận JSON: text='{payload.text}', image={(!string.IsNullOrEmpty(payload.image) ? "có" : "không")}");
             }
             catch (Exception e)
             {
-                Debug.LogError($"[WebSocket] Lỗi parse JSON: {e.Message}");
+                Debug.LogError($"[WebSocket] ❌ Lỗi parse JSON: {e.Message}");
             }
         }
         else if (bytes.Length > 4 && bytes[0] == 0x89 && bytes[1] == 0x50)
         {
             // PNG magic bytes → đây là raw image binary
-            if (_pendingText != null)
+            string pendingText = null;
+            lock (_textQueueLock)
             {
-                ReceivedData data = new ReceivedData { text = _pendingText, imageBytes = bytes };
+                if (_pendingTexts.Count > 0)
+                {
+                    pendingText = _pendingTexts.Dequeue();
+                }
+            }
+
+            if (pendingText != null)
+            {
+                ReceivedData data = new ReceivedData { text = pendingText, imageBytes = bytes };
                 lock (_queueLock) { _dataQueue.Enqueue(data); }
-                _pendingText = null;
-                Debug.Log("[WebSocket] Nhận PNG binary sau text.");
+                Debug.Log($"[WebSocket] ✅ Nhận PNG binary (text='{pendingText}', size={bytes.Length} bytes)");
             }
             else
             {
+                // Nếu không có pending text, tạo record với image only
                 ReceivedData data = new ReceivedData { text = "", imageBytes = bytes };
                 lock (_queueLock) { _dataQueue.Enqueue(data); }
+                Debug.LogWarning($"[WebSocket] ⚠️ Nhận PNG nhưng không có pending text (size={bytes.Length} bytes)");
             }
         }
         else
         {
             // Có thể là text-only message (không có ảnh), chờ binary tiếp theo
-            _pendingText = message.Trim();
-            Debug.Log($"[WebSocket] Nhận text: '{_pendingText}', chờ image...");
+            string textMessage = message.Trim();
+            lock (_textQueueLock)
+            {
+                _pendingTexts.Enqueue(textMessage);
+            }
+            Debug.Log($"[WebSocket] 📝 Nhận text: '{textMessage}' (đang chờ image...) - Pending queue: {_pendingTexts.Count}");
         }
     }
 
